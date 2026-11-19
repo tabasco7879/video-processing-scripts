@@ -2,7 +2,19 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-folder="${1:-.}"
+auto_yes=0
+folder="."
+
+for arg in "$@"; do
+    case "$arg" in
+        -y|--yes)
+            auto_yes=1
+            ;;
+        *)
+            folder="$arg"
+            ;;
+    esac
+done
 
 # Convert input directory to an absolute path.
 folder=$(realpath -- "$folder") || exit 1
@@ -38,6 +50,16 @@ fi
 csv_escape() {
     local value="${1//\"/\"\"}"
     printf '"%s"' "$value"
+}
+
+confirm_action() {
+    local prompt="$1"
+    if (( auto_yes == 1 )); then
+        return 0
+    fi
+    local reply
+    read -r -p "$prompt [y/N]: " reply < /dev/tty || return 1
+    [[ "$reply" =~ ^[Yy]([Ee][Ss])?$ ]]
 }
 
 # Load existing CSV records: original_path -> compressed_path
@@ -78,7 +100,7 @@ verify_compressed() {
 }
 
 # Search recursively, excluding the compressed directory.
-while IFS= read -r -d '' input; do
+while IFS= read -r -u 3 -d '' input; do
 
     codec=$(ffprobe -v error -select_streams v:0 \
         -show_entries stream=codec_name \
@@ -110,7 +132,11 @@ while IFS= read -r -d '' input; do
             echo "Skipping verified compressed output: $logged_output"
             continue
         else
-            echo "Verification failed for logged output ($logged_output), re-compressing: $input"
+            echo "Verification failed for logged output: $logged_output"
+            if ! confirm_action "Re-encode $input?"; then
+                echo "Skipping re-encode: $input"
+                continue
+            fi
         fi
     fi
 
@@ -159,7 +185,7 @@ while IFS= read -r -d '' input; do
         exit 1
     fi
 
-done < <(
+done 3< <(
     find "$folder" \
         -type d -name compressed -prune -o \
         -type f -iname '*.mp4' -print0
