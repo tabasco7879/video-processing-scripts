@@ -54,6 +54,43 @@ compress:
 		printf '"%s"' "$$value"
 	}
 
+	# Load existing CSV records: original_path -> compressed_path
+	declare -A logged_outputs=()
+	line_num=0
+	while IFS= read -r line || [[ -n "$$line" ]]; do
+		line="$${line%$$'\r'}"
+		(( line_num += 1 ))
+		if (( line_num == 1 )) && [[ "$$line" == "original_path,compressed_path" ]]; then
+			continue
+		fi
+		[[ -z "$$line" ]] && continue
+		if [[ "$$line" =~ ^\"(([^\"]|\"\")*)\",\"(([^\"]|\"\")*)\"$$ ]]; then
+			orig_path="$${BASH_REMATCH[1]//\"\"/\"}"
+			comp_path="$${BASH_REMATCH[3]//\"\"/\"}"
+			logged_outputs["$$orig_path"]="$$comp_path"
+		fi
+	done < "$$csv_file"
+
+	verify_compressed() {
+		local src="$$1"
+		local dst="$$2"
+		[[ -s "$$dst" ]] || return 1
+
+		local dst_codec dst_height src_size dst_size
+		dst_codec=$$(ffprobe -v error -select_streams v:0 \
+			-show_entries stream=codec_name \
+			-of default=noprint_wrappers=1:nokey=1 "$$dst" 2>/dev/null) || return 1
+
+		dst_height=$$(ffprobe -v error -select_streams v:0 \
+			-show_entries stream=height \
+			-of default=noprint_wrappers=1:nokey=1 "$$dst" 2>/dev/null) || return 1
+
+		src_size=$$(stat -c %s -- "$$src") || return 1
+		dst_size=$$(stat -c %s -- "$$dst") || return 1
+
+		[[ "$$dst_codec" == "hevc" && "$$dst_height" == "2160" ]] && (( dst_size < src_size ))
+	}
+
 	while IFS= read -r -d '' input; do
 		codec=$$(ffprobe -v error -select_streams v:0 \
 			-show_entries stream=codec_name \
@@ -74,9 +111,14 @@ compress:
 
 		output="$$target_dir/$${filename%.*}_hevc.mp4"
 
-		if [[ -e "$$output" ]]; then
-			echo "Skipping existing output: $$output"
-			continue
+		if [[ -n "$${logged_outputs["$$input"]:-}" ]]; then
+			logged_output="$${logged_outputs["$$input"]}"
+			if verify_compressed "$$input" "$$logged_output"; then
+				echo "Skipping verified compressed output: $$logged_output"
+				continue
+			else
+				echo "Verification failed for logged output ($$logged_output), re-compressing: $$input"
+			fi
 		fi
 
 		temp=$$(mktemp --tmpdir="$$target_dir" '.encode-XXXXXXXX.mp4') || exit 1
@@ -97,12 +139,15 @@ compress:
 			if (( output_size < source_size )); then
 				mv -- "$$temp" "$$output"
 
-				{
-					csv_escape "$$input"
-					printf ','
-					csv_escape "$$output"
-					printf '\n'
-				} >> "$$csv_file"
+				if [[ "$${logged_outputs["$$input"]:-}" != "$$output" ]]; then
+					{
+						csv_escape "$$input"
+						printf ','
+						csv_escape "$$output"
+						printf '\n'
+					} >> "$$csv_file"
+					logged_outputs["$$input"]="$$output"
+				fi
 
 				echo "Saved: $$output"
 				echo "Bytes: $$source_size -> $$output_size"
